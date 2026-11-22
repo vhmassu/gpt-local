@@ -137,13 +137,26 @@ def openclaw() -> bool:
     return True
 
 
+# ------------------------------------------------------------------ Codex / GPT Local
+def codex() -> bool:
+    print("• Codex / GPT Local")
+    raiz = HOME / ".codex"
+    if not raiz.exists():
+        print("   – No encontré ~/.codex. Omitido.")
+        return False
+    agregar_reglas(raiz / "AGENTS.md", "gpt-local")
+    print("   → GPT Local recibe la memoria por el puente de Telegram (parche_telegram.py).")
+    return True
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--solo", choices=["openclaw", "hermes", "antigravity"])
+    ap.add_argument("--solo", choices=["openclaw", "hermes", "antigravity", "codex"])
     ap.add_argument("--simular", action="store_true", help="muestra qué haría sin escribir")
     a = ap.parse_args()
     SIMULAR = a.simular
-    for nombre, fn in (("openclaw", openclaw), ("hermes", hermes), ("antigravity", antigravity)):
+    for nombre, fn in (("openclaw", openclaw), ("hermes", hermes), ("antigravity", antigravity),
+                       ("codex", codex)):
         if not a.solo or a.solo == nombre:
             fn()
     print("\nGemi (Telegram) no usa MCP: ver README, sección Gemi (2 líneas en su código).")

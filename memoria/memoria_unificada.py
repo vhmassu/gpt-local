@@ -10,6 +10,7 @@ Configuración (variables de entorno o ~/.memoria-unificada/config.env):
   OLLAMA_URL          http://localhost:11434
   EMBED_MODEL         nomic-embed-text
   MEMORIA_AGENTE      nombre del agente que escribe (gemi, openclaw, hermes, antigravity)
+  MEMORIA_UMBRAL      0.5  (relevancia mínima 0-1 para que un recuerdo salga en búsquedas)
 
 Solo depende de `requests`.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -52,6 +54,7 @@ QDRANT_API_KEY = _cfg("QDRANT_API_KEY")
 COLECCION = _cfg("MEMORIA_COLECCION", "memoria_unificada")
 OLLAMA_URL = _cfg("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 EMBED_MODEL = _cfg("EMBED_MODEL", "nomic-embed-text")
+UMBRAL = float(_cfg("MEMORIA_UMBRAL", "0.5"))
 TIMEOUT = 30
 
 
@@ -135,6 +138,32 @@ def asegurar_coleccion() -> None:
     _lista = True
 
 
+# ---------------------------------------------------------------- calidad
+_PALABRAS_UTILES = re.compile(
+    r"\b(recuerda|acu[eé]rdate|anota|guarda|prefiero|prefiere|siempre|nunca|cliente|"
+    r"cotiza|cotizaci[oó]n|precio|renta|venta|tarifa|mxn|pesos|iva|cita|pendiente|"
+    r"tel[eé]fono|correo|direcci[oó]n|montacargas|plataforma|genie|tijera|brazo|lote|local|"
+    r"alameda|bni|campa[ñn]a|google ads|facebook|contrato|factura|pago|entrega)\b", re.I)
+
+
+def es_basura(texto: str) -> bool:
+    """True si el texto no vale la pena como recuerdo duradero.
+
+    Pensado sobre todo para dictados de voz mal transcritos ("Victor dijo: ...").
+    """
+    t = (texto or "").strip()
+    cuerpo = re.sub(r"^victor dijo( \([^)]*\))?:\s*", "", t, flags=re.I)
+    palabras = re.findall(r"\w+", cuerpo.lower())
+    if len(palabras) < 4:
+        return True
+    if len(set(palabras)) / len(palabras) < 0.5:  # muy repetitivo
+        return True
+    es_dictado = cuerpo != t
+    if es_dictado and not (_PALABRAS_UTILES.search(cuerpo) or re.search(r"\d", cuerpo)):
+        return True  # charla sin datos duraderos
+    return False
+
+
 # ---------------------------------------------------------------- API pública
 def _texto_de(payload: dict) -> str:
     # Compatible con colecciones creadas por mem0 / otros agentes.
@@ -145,11 +174,15 @@ def _texto_de(payload: dict) -> str:
 
 
 def guardar(texto: str, agente: str | None = None, tipo: str = "hecho",
-            etiquetas: list[str] | None = None, fuente: str = "") -> str:
-    """Guarda un recuerdo. Mismo texto + mismo agente = no se duplica."""
+            etiquetas: list[str] | None = None, fuente: str = "",
+            extra: dict | None = None, forzar: bool = False) -> str:
+    """Guarda un recuerdo. Mismo texto + mismo agente = no se duplica.
+    Rechaza textos sin valor (ver es_basura) salvo forzar=True."""
     texto = (texto or "").strip()
     if not texto:
         raise MemoriaError("Texto vacío.")
+    if not forzar and es_basura(texto):
+        raise MemoriaError("Texto demasiado corto o sin datos útiles; no se guardó.")
     agente = (agente or _cfg("MEMORIA_AGENTE", "desconocido")).lower()
     asegurar_coleccion()
     pid = str(uuid.uuid5(NAMESPACE, f"{agente}|{texto}"))
@@ -161,21 +194,28 @@ def guardar(texto: str, agente: str | None = None, tipo: str = "hecho",
         "creado": ahora, "created_at": ahora, "ts": time.time(),
         "hash": hashlib.md5(texto.encode()).hexdigest(),
     }
+    if extra:
+        payload.update(extra)
     _qdrant("PUT", f"/collections/{COLECCION}/points?wait=true",
             json={"points": [{"id": pid, "vector": embedding(texto), "payload": payload}]})
     return pid
 
 
 def buscar(consulta: str, limite: int = 5, agente: str | None = None,
-           umbral: float = 0.35) -> list[dict]:
-    """Búsqueda semántica en la memoria de TODOS los agentes (o de uno)."""
+           umbral: float | None = None, tipo: str | None = None) -> list[dict]:
+    """Búsqueda semántica en la memoria de TODOS los agentes (o de uno / un tipo)."""
     asegurar_coleccion()
     cuerpo = {"vector": embedding(consulta), "limit": limite, "with_payload": True,
-              "score_threshold": umbral}
+              "score_threshold": UMBRAL if umbral is None else umbral}
+    filtro: dict = {}
     if agente:
-        cuerpo["filter"] = {"should": [
+        filtro["should"] = [
             {"key": "agente", "match": {"value": agente.lower()}},
-            {"key": "agent_id", "match": {"value": agente.lower()}}]}
+            {"key": "agent_id", "match": {"value": agente.lower()}}]
+    if tipo:
+        filtro["must"] = [{"key": "tipo", "match": {"value": tipo}}]
+    if filtro:
+        cuerpo["filter"] = filtro
     res = _qdrant("POST", f"/collections/{COLECCION}/points/search", json=cuerpo) or []
     return [{"texto": _texto_de(p["payload"]),
              "agente": p["payload"].get("agente") or p["payload"].get("agent_id") or "?",
@@ -192,6 +232,47 @@ def recientes(limite: int = 10, agente: str | None = None) -> list[dict]:
     puntos = sorted(res.get("points", []), key=lambda p: p["payload"].get("ts", 0), reverse=True)
     return [{"texto": _texto_de(p["payload"]), "agente": p["payload"].get("agente", "?"),
              "creado": p["payload"].get("creado", "")} for p in puntos[:limite]]
+
+
+def todos(limite_lote: int = 256):
+    """Recorre todos los recuerdos (para limpieza). Devuelve dicts con id y payload."""
+    if info_coleccion() is None:
+        return
+    offset = None
+    while True:
+        cuerpo: dict = {"limit": limite_lote, "with_payload": True, "with_vector": False}
+        if offset is not None:
+            cuerpo["offset"] = offset
+        res = _qdrant("POST", f"/collections/{COLECCION}/points/scroll", json=cuerpo) or {}
+        for p in res.get("points", []):
+            yield {"id": p["id"], "payload": p["payload"], "texto": _texto_de(p["payload"])}
+        offset = res.get("next_page_offset")
+        if offset is None:
+            break
+
+
+def guardar_cliente(nombre: str, empresa: str = "", telefono: str = "", correo: str = "",
+                    equipo: str = "", precio: str = "", fecha: str = "", notas: str = "",
+                    agente: str | None = None) -> str:
+    """Ficha de cliente: queda como recuerdo tipo 'cliente' con campos estructurados."""
+    nombre = (nombre or "").strip()
+    if not nombre:
+        raise MemoriaError("Falta el nombre del cliente.")
+    fecha = fecha or datetime.now().strftime("%Y-%m-%d")
+    partes = [f"Cliente: {nombre}" + (f" ({empresa})" if empresa else "")]
+    for etiqueta, valor in (("tel", telefono), ("correo", correo), ("equipo", equipo),
+                            ("precio", precio), ("fecha", fecha), ("notas", notas)):
+        if valor:
+            partes.append(f"{etiqueta}: {valor}")
+    ficha = {"nombre": nombre, "empresa": empresa, "telefono": telefono, "correo": correo,
+             "equipo": equipo, "precio": precio, "fecha": fecha, "notas": notas}
+    return guardar(" · ".join(partes), agente=agente, tipo="cliente",
+                   etiquetas=["cliente"], extra={"cliente": ficha}, forzar=True)
+
+
+def buscar_cliente(consulta: str, limite: int = 5) -> list[dict]:
+    """Busca fichas de clientes (nombre, empresa, equipo...)."""
+    return buscar(consulta, limite=limite, tipo="cliente", umbral=min(UMBRAL, 0.4))
 
 
 def borrar(punto_id: str) -> None:
@@ -217,7 +298,18 @@ def formatear_contexto(resultados: list[dict]) -> str:
     return "Memoria compartida relevante:\n" + "\n".join(lineas)
 
 
-if __name__ == "__main__":  # prueba rápida: python memoria_unificada.py "consulta"
+if __name__ == "__main__":
+    # python memoria_unificada.py "consulta"                       -> contexto relevante
+    # python memoria_unificada.py --guardar "texto" [agente] [tipo] -> guarda un recuerdo
     import sys
-    q = " ".join(sys.argv[1:]) or "MBA Saltillo"
-    print(formatear_contexto(buscar(q)) or "Sin resultados.")
+    args = sys.argv[1:]
+    if args[:1] == ["--guardar"] and len(args) >= 2:
+        try:
+            print(guardar(args[1], agente=(args[2] if len(args) > 2 else None),
+                          tipo=(args[3] if len(args) > 3 else "hecho"), fuente="cli"))
+        except MemoriaError as e:
+            print(f"No guardado: {e}")
+            sys.exit(1)
+    else:
+        q = " ".join(args) or "MBA Saltillo"
+        print(formatear_contexto(buscar(q)) or "Sin resultados.")

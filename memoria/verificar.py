@@ -66,6 +66,17 @@ def estado_gemi() -> tuple[bool, str]:
     return False, "su código aún no importa gemi_memoria (ver README §Gemi)"
 
 
+def estado_telegram() -> tuple[bool, str]:
+    hallados = sorted((HOME / ".codex/.chatgpt-projects").glob("*/scripts/telegram_puente.py"))
+    if not hallados:
+        return False, "no encontré telegram_puente.py"
+    t = leer(hallados[0])
+    lee, guarda = ".memoria-unificada" in t, "memoria-unificada:guardar" in t
+    if lee and guarda:
+        return True, "lee y guarda"
+    return False, "solo lee (corre parche_telegram.py)" if lee else "sin conectar (corre parche_telegram.py)"
+
+
 def main() -> None:
     print(f"Qdrant: {mem.QDRANT_URL} · colección: {mem.COLECCION} · embeddings: {mem.EMBED_MODEL}")
     try:
@@ -83,7 +94,9 @@ def main() -> None:
     if qdrant_ok and mem.info_coleccion() is not None:
         print(f"Total recuerdos: {mem.contar()}")
 
-    filas = [("Gemi (Telegram)", "gemi", estado_gemi), ("OpenClaw", "openclaw", estado_openclaw),
+    filas = [("Gemi (escritorio)", "gemi", estado_gemi),
+             ("Bot Telegram (GPT Local)", "telegram", estado_telegram),
+             ("OpenClaw", "openclaw", estado_openclaw),
              ("Hermes", "hermes", estado_hermes), ("Antigravity", "antigravity", estado_antigravity)]
     print("\n| Agente | Memoria unificada (Qdrant) | Recuerdos | Detalle |")
     print("|---|---|---|---|")
@@ -91,6 +104,9 @@ def main() -> None:
         ok, detalle = fn()
         n = mem.contar(clave) if qdrant_ok else "?"
         print(f"| {nombre} | {'✅ Conectado' if ok else '❌ Falta'} | {n} | {detalle} |")
+    if qdrant_ok and mem.info_coleccion() is not None:
+        print(f"\nCodex importado: {mem.contar('codex')} · fichas de clientes: "
+              f"{sum(1 for p in mem.todos() if p['payload'].get('tipo') == 'cliente')}")
 
 
 if __name__ == "__main__":

@@ -62,6 +62,35 @@ recordar_turno(texto_usuario, respuesta)         # después de responder
 Si Qdrant u Ollama no responden, Gemi sigue funcionando sin memoria. Corre Gemi con el venv
 `~/.memoria-unificada/venv/bin/python` o instala `requests` en su propio entorno.
 
+## Bot de Telegram (GPT Local)
+
+`parche_telegram.py` conecta `telegram_puente.py` a la memoria (lo corre el instalador, con respaldo):
+- **Lee:** antes de mandar tu mensaje a GPT Local, le antepone los recuerdos relevantes.
+- **Guarda:** si tu mensaje trae datos duraderos ("recuerda…", precios, clientes), lo guarda como agente `telegram`.
+
+## Cotizaciones MBA Saltillo
+
+`cotizar.py` genera PDF en `~/Cotizaciones/` (MXN, IVA 16 % desglosado, folio automático) y registra al cliente.
+- Llena tus tarifas (sin IVA) en `~/Cotizaciones/precios.json` y tus datos en `~/Cotizaciones/empresa.json`.
+- Si falta una tarifa, **no inventa**: la pide.
+- Los agentes con MCP usan la herramienta `generar_cotizacion`; por línea de comandos:
+  `~/.memoria-unificada/venv/bin/python ~/.memoria-unificada/cotizar.py datos.json`
+
+## Limpieza
+
+`limpiar.py` lista dictados confusos y duplicados (no toca fichas de clientes). Solo borra con `--aplicar`
+y guarda copia de lo borrado. El filtro de relevancia se ajusta con `MEMORIA_UMBRAL` en `config.env`.
+
+## Acceso directo de Hermes
+
+`acceso_hermes.sh` crea "Hermes Agent" con ícono propio y lo ancla al dock de COSMIC (respaldo de favoritos).
+
+## Telegram exclusivo para Hermes (opcional)
+
+1. En Telegram, habla con @BotFather → `/newbot` → guarda el token (**bot nuevo**, no el de GPT Local).
+2. `hermes setup gateway` → marca **Telegram** → pega el token y tu ID de chat.
+3. `hermes gateway install` para que arranque solo. Ollama libera el modelo tras 5 min sin uso.
+
 ## Herramientas MCP disponibles
 
 | Herramienta | Uso |
@@ -69,6 +98,9 @@ Si Qdrant u Ollama no responden, Gemi sigue funcionando sin memoria. Corre Gemi 
 | `buscar_memoria(consulta, limite, solo_agente)` | Búsqueda semántica en la memoria de todos |
 | `guardar_memoria(texto, tipo, etiquetas)` | Guarda un dato duradero |
 | `memorias_recientes(limite, solo_agente)` | Lo último guardado |
+| `guardar_cliente(nombre, empresa, telefono, correo, equipo, precio, notas)` | Ficha de cliente |
+| `buscar_cliente(consulta)` | Historial de un cliente |
+| `generar_cotizacion(datos_json)` | PDF de cotización MXN con IVA |
 | `borrar_memoria(id)` | Elimina un recuerdo incorrecto |
 
 ## Comandos útiles
@@ -77,7 +109,8 @@ Si Qdrant u Ollama no responden, Gemi sigue funcionando sin memoria. Corre Gemi 
 P=~/.memoria-unificada/venv/bin/python; cd ~/.memoria-unificada
 $P verificar.py                       # tabla de estado por agente
 $P memoria_unificada.py "Plaza Alameda"   # buscar desde terminal
-$P importar.py --todos                # reimportar memorias propias de los agentes
+$P importar.py --todos                # reimportar memorias propias (incluye Codex)
+$P limpiar.py                         # ver basura/duplicados (agrega --aplicar para borrar)
 $P conectar_agentes.py --solo hermes  # reconectar un solo agente
 ```
 
