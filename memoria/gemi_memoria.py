@@ -9,6 +9,9 @@ Gemi no usa MCP, así que importa esto directamente. Uso en el bot:
     recordar_turno(texto_usuario, respuesta)     # después de responder
 
 Si Qdrant u Ollama no están disponibles, Gemi sigue funcionando sin memoria.
+
+Desde otro programa (p. ej. el puente de Telegram, que usa otro Python):
+    venv/bin/python gemi_memoria.py --recordar-turno "texto del usuario" --agente telegram
 """
 from __future__ import annotations
 
@@ -25,10 +28,8 @@ import memoria_unificada as mem  # noqa: E402
 
 log = logging.getLogger("gemi_memoria")
 
-# Frases que indican que vale la pena guardar algo.
-_DISPARADORES = re.compile(
-    r"\b(recuerda|acuérdate|no olvides|anota|guarda|mi (nombre|correo|tel[eé]fono)|"
-    r"prefiero|siempre|nunca|cliente|cotiza|precio|cita|pendiente)\b", re.I)
+# Frases que indican que vale la pena guardar algo (mismas que el filtro de calidad).
+_DISPARADORES = mem._PALABRAS_UTILES
 
 
 def con_memoria(texto_usuario: str, limite: int = 5) -> str:
@@ -43,20 +44,41 @@ def con_memoria(texto_usuario: str, limite: int = 5) -> str:
     return f"{ctx}\n\n(Usa la memoria solo si es relevante.)\n\nMensaje de Victor: {texto_usuario}"
 
 
-def recordar(texto: str, tipo: str = "hecho") -> None:
+def recordar(texto: str, tipo: str = "hecho", agente: str = "gemi", fuente: str = "gemi") -> bool:
     try:
-        mem.guardar(texto, agente="gemi", tipo=tipo, fuente="telegram")
+        mem.guardar(texto, agente=agente, tipo=tipo, fuente=fuente)
+        return True
     except Exception as e:
         log.warning("No se guardó en memoria: %s", e)
+        return False
 
 
-def recordar_turno(texto_usuario: str, respuesta: str = "") -> None:
-    """Guarda en segundo plano lo que Victor dijo si parece un dato duradero."""
-    if len(texto_usuario) < 12 or not _DISPARADORES.search(texto_usuario):
+def nota_de_turno(texto_usuario: str, canal: str = "Telegram") -> str | None:
+    """Devuelve la nota a guardar, o None si el mensaje no trae datos duraderos."""
+    t = (texto_usuario or "").strip()
+    if len(t) < 12 or t.startswith("/") or not _DISPARADORES.search(t):
+        return None
+    nota = f"Victor dijo ({canal}): {t[:800]}"
+    return None if mem.es_basura(nota) else nota
+
+
+def recordar_turno(texto_usuario: str, respuesta: str = "", agente: str = "gemi",
+                   canal: str = "Telegram", en_segundo_plano: bool = True) -> None:
+    """Guarda lo que Victor dijo si parece un dato duradero."""
+    nota = nota_de_turno(texto_usuario, canal)
+    if not nota:
         return
-    nota = f"Victor dijo (Telegram): {texto_usuario.strip()}"
-    threading.Thread(target=recordar, args=(nota,), daemon=True).start()
+    if en_segundo_plano:
+        threading.Thread(target=recordar, args=(nota, "hecho", agente, canal.lower()),
+                         daemon=True).start()
+    else:
+        recordar(nota, "hecho", agente, canal.lower())
 
 
 if __name__ == "__main__":
-    print(con_memoria(" ".join(sys.argv[1:]) or "¿Qué sabes de mis negocios?"))
+    a = sys.argv[1:]
+    if a[:1] == ["--recordar-turno"] and len(a) >= 2:
+        agente = a[a.index("--agente") + 1] if "--agente" in a else "gemi"
+        recordar_turno(a[1], agente=agente, en_segundo_plano=False)
+    else:
+        print(con_memoria(" ".join(a) or "¿Qué sabes de mis negocios?"))
